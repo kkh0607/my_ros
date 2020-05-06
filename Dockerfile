@@ -1,5 +1,5 @@
 # parameters
-ARG REPO_NAME="newfile"
+ARG REPO_NAME="my_ros"
 
 # ==================================================>
 # ==> Do not change this code
