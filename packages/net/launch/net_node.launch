@@ -1,0 +1,10 @@
+<launch>
+  <arg name="veh" doc="Name of vehicle. ex: megaman"/>
+  <arg name="pkg_name" value="net"/>
+  <arg name="node_name" value="net_node"/>
+
+  <group ns="$(arg veh)">
+    <node name="net_node"  pkg="$(arg pkg_name)" type="$(arg node_name).py" output="screen" required="true"/>
+  </group>
+
+</launch>

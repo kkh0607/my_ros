@@ -4,4 +4,5 @@ set -e
 
 # YOUR CODE BELOW THIS LINE
 # ----------------------------------------------------------------------------
-echo "This is an empty launch script. Update it to launch your application."
+roslaunch my_package follower.launch veh:=duckiesam
+#rosrun my_package drive_circle.py
