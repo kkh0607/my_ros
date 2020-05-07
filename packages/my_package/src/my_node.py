@@ -209,6 +209,7 @@ class MyNode(DTROS):
             errorB = (self.d_e_1 - self.d_e_2)/dt
             
             e_v = error_d - errorB
+            #PID controller for the angle, velocity is default or 0.
             
             P = self.Kp*(e_v)
             self.I = self.I + self.Ki*(e_v + self.e_vB)/2*dt
