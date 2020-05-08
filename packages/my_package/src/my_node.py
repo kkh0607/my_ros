@@ -215,7 +215,7 @@ class MyNode(DTROS):
             self.I = self.I + self.Ki*(e_v + self.e_vB)/2*dt
             D = self.Kd*(e_v + self.e_vB)/dt
             
-            self.speedN = P + self.I + D
+            #self.speedN = P + self.I + D
             
             self.rotationN = self.Rp*(y_to) + self.Ri*(angle_to) + self.Rd*(np.sin(angle_to))
             

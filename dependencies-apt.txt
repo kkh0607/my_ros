@@ -1,2 +1,4 @@
 # LIST YOUR APT PACKAGES HERE
 ros-kinetic-image-geometry
+ros-kinetic-joy
+ros-kinetic-tf-conversions
