@@ -240,7 +240,7 @@ class MyNode(DTROS):
         self.controltime = time
 
     def my_shutdown(self):
-	cmd = Twist2DStamped()
+        cmd = Twist2DStamped()
         cmd.v = 0
         cmd.omega = 0
         self.pub_move.publish(cmd)
