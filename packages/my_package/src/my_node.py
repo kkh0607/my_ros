@@ -41,13 +41,14 @@ class MyNode(DTROS):
         self.detected = False
 
 	#values for calculating pose of robot
+	self.originalmatrix()
         self.solP = False
-        self.rotationvector = None
-        self.translationvector = None
+        #self.rotationvector = None
+        #self.translationvector = None
         self.axis = np.float32([[0.0125,0,0], [0,0.0125,0], [0,0,-0.0375]]).reshape(-1,3)
-        self.distance = None
-        self.angle_f = None
-        self.angle_l = None
+        #self.distance = None
+        #self.angle_f = None
+        #self.angle_l = None
 
 	#values for driving the robot
         self.maxdistance = 0.2
@@ -67,10 +68,12 @@ class MyNode(DTROS):
         self.Rp = 1
         self.Ri = 1
         self.Rd = 1
+
+	rospy.on_shutdown(self.my_shutdown)
         
     def initialvalues(self):
-        self.default_v = 0.22
-        self.maxdistance = 0.3
+        self.default_v = 0.20
+        self.maxdistance = 0.2
         self.speedN = 0
         self.e_vB = 0
         self.rotationN = 0
@@ -111,12 +114,12 @@ class MyNode(DTROS):
         
         detection, corners = cv2.findCirclesGrid(gray,(7,3))
         
-        self.processedImg = self.imagelast.copy()
+        processedImg = self.imagelast.copy()
         cmd = Twist2DStamped()
         cmd.header.stamp = self.starting
 
         if detection:
-            cv2.drawChessboardCorners(self.processedImg, (7,3), corners, detection)
+            cv2.drawChessboardCorners(processedImg, (7,3), corners, detection)
             self.detected = True
             #self.controltime = rospy.Time.now()
             twoone = []
@@ -125,22 +128,22 @@ class MyNode(DTROS):
                 twoone.append(point)
             twoone = np.array(twoone)
             
-            self.originalmatrix()
-            self.gradient(twoone)
+            
+            rotationvector, translationvector, processedImg = self.gradient(twoone,processedImg)
             self.detected = self.solP
-            img_out = self.bridge.cv2_to_imgmsg(self.processedImg, "bgr8")
+            img_out = self.bridge.cv2_to_imgmsg(processedImg, "bgr8")
             self.pub_image.publish(img_out)
-            self.find_distance()
-            ###self.move(self.y2, self.angle_l, self.distance)
+            distance, angle_f, angle_l, y2 = self.find_distance(rotationvector, translationvector)
+            self.move(y2, angle_l, distance)
             self.ending = rospy.Time.now()
         else:
             self.detected = False
-            img_out = self.bridge.cv2_to_imgmsg(gray, "bgr8")
+            img_out = self.bridge.cv2_to_imgmsg(self.imagelast, "bgr8")
             self.pub_image.publish(img_out)
             self.ending = rospy.Time.now()
             cmd.v = 0
             cmd.omega = 0
-            ####self.pub_move.publish(cmd)
+            self.pub_move.publish(cmd)
             
     #step 2 : makes matrix for 3d original shape
     def originalmatrix(self):
@@ -153,41 +156,43 @@ class MyNode(DTROS):
 
     
     #step 3 : use intrinsic matrix and solvePnP, return rvec and tvec, print axis
-    def gradient(self, imgpts):
+    def gradient(self, imgpts, processedImg):
     #using solvePnP to find rotation vector and translation vector and also find 3D point to the image plane
-        self.solP, self.rotationvector, self.translationvector = cv2.solvePnP(self.originalmtx, imgpts, self.camerainfo.intrinsicMatrix(), self.camerainfo.distortionCoeffs())
-        if self.solP:
-            pointsin3D, jacoB = cv2.projectPoints(self.originalmtx, self.rotationvector, self.translationvector, self.camerainfo.intrinsicMatrix(), self.camerainfo.distortionCoeffs())
-            pointaxis, _ = cv2.projectPoints(self.axis, self.rotationvector, self.translationvector, self.camerainfo.intrinsicMatrix(), self.camerainfo.distortionCoeffs())
-            self.processedImg = cv2.line(self.processedImg, tuple(imgpts[10].ravel()), tuple(pointaxis[0].ravel()), (255, 0, 0), 2)
-            self.processedImg = cv2.line(self.processedImg, tuple(imgpts[10].ravel()), tuple(pointaxis[1].ravel()), (0, 255, 0), 2)
-            self.processedImg = cv2.line(self.processedImg, tuple(imgpts[10].ravel()), tuple(pointaxis[2].ravel()), (0, 0, 255), 3)
+        solP, rotationvector, translationvector = cv2.solvePnP(self.originalmtx, imgpts, self.camerainfo.intrinsicMatrix(), self.camerainfo.distortionCoeffs())
+        if solP:
+            pointsin3D, jacoB = cv2.projectPoints(self.originalmtx, rotationvector, translationvector, self.camerainfo.intrinsicMatrix(), self.camerainfo.distortionCoeffs())
+            pointaxis, _ = cv2.projectPoints(self.axis, rotationvector, translationvector, self.camerainfo.intrinsicMatrix(), self.camerainfo.distortionCoeffs())
+            processedImg = cv2.line(processedImg, tuple(imgpts[10].ravel()), tuple(pointaxis[0].ravel()), (255, 0, 0), 2)
+            processedImg = cv2.line(processedImg, tuple(imgpts[10].ravel()), tuple(pointaxis[1].ravel()), (0, 255, 0), 2)
+            processedImg = cv2.line(processedImg, tuple(imgpts[10].ravel()), tuple(pointaxis[2].ravel()), (0, 0, 255), 3)
 	    #textdistance = "x = %s, y = %s, z = %s" % (self.distance, self.angle_f, self.angle_l, self.y2)
             #rospy.loginfo("%s" % textdistance)
+	return rotationvector, translationvector, processedImg
 
     #step 4 : find distance between robot and following robot print out distance and time
-    def find_distance(self):
+    def find_distance(self, translationvector, rotationvector):
     #use tvec to calculate distance
-        tvx = self.translationvector[0]
-        tvy = self.translationvector[1]
-        tvz = self.translationvector[2]
+        tvx = translationvector[0]
+        tvy = translationvector[1]
+        tvz = translationvector[2]
         
-        self.distance = math.sqrt(tvx*tvx + tvz*tvz)
-        self.angle_f = np.arctan2(tvx[0],tvz[0])
+        distance = math.sqrt(tvx*tvx + tvz*tvz)
+        angle_f = np.arctan2(tvx[0],tvz[0])
 
-        R, _ = cv2.Rodrigues(self.rotationvector)
+        R, _ = cv2.Rodrigues(rotationvector)
         R_inverse = np.transpose(R)
-        self.angle_l = np.arctan2(-R_inverse[2,0], math.sqrt(R_inverse[2,1]**2 + R_inverse[2,2]**2))
+        angle_l = np.arctan2(-R_inverse[2,0], math.sqrt(R_inverse[2,1]**2 + R_inverse[2,2]**2))
         
-        T = np.array([-np.sin(self.angle_l), np.cos(self.angle_l)])
-        tvecW = -np.dot(R_inverse, self.translationvector)
+        T = np.array([-np.sin(angle_l), np.cos(angle_l)])
+        tvecW = -np.dot(R_inverse, translationvector)
         x_y = np.array([tvz[0], tvx[0]])
         
-        self.y2 = -np.dot(T,x_y) - 0.01*np.sin(self.angle_l)
+        y2 = -np.dot(T,x_y) - 0.01*np.sin(angle_l)
         
-        textdistance = "Distance = %s, Angle of Follower = %s, Angle of Leader = %s, y = %s" % (self.distance, self.angle_f, self.angle_l, self.y2)
+        textdistance = "Distance = %s, Angle of Follower = %s, Angle of Leader = %s, y = %s" % (distance, angle_f, angle_l, y2)
         rospy.loginfo("%s" % textdistance)
         #self.pub.publish(textdistance)
+	return distance, angle_f, angle_l, y2
         
     #step 5 : use joy mapper to control the robot PID controller
     def move(self, y_to, angle_to, d):
@@ -219,7 +224,7 @@ class MyNode(DTROS):
             
             self.rotationN = self.Rp*(y_to) + self.Ri*(angle_to) + self.Rd*(np.sin(angle_to))
             
-            cmd.v = self.speedN
+            cmd.v = self.default_v
             cmd.omega = self.rotationN
 
             self.e_vB = e_v
@@ -234,16 +239,24 @@ class MyNode(DTROS):
         self.pub_move.publish(cmd)
         self.controltime = time
 
+    def my_shutdown(self):
+	cmd = Twist2DStamped()
+        cmd.v = 0
+        cmd.omega = 0
+        self.pub_move.publish(cmd)
+        rospy.sleep(1)
+        print("shutting down") 
+
 
 if __name__ == '__main__':
     # create the node
     node = MyNode(node_name='my_node')
     
     # keep spinning
-    try:
-        rospy.spin()
-    except KeyboardInterrupt:
-        print("shutting down")
+   # try:
+    rospy.spin()
+    #except KeyboardInterrupt:
+    #    print("shutting down")
 	
-    cv2.destroyAllWindows()
+    #cv2.destroyAllWindows()
     
