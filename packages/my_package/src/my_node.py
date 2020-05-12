@@ -7,13 +7,13 @@ import sys
 import rospy
 import math
 import time
-from mutex import mutex
 from duckietown import DTROS
 from std_msgs.msg import String
 from sensor_msgs.msg import CompressedImage, CameraInfo, Image
+from geometry_msgs.msg import PointStamped
 from cv_bridge import CvBridge, CvBridgeError
 from image_geometry import PinholeCameraModel
-from duckietown_msgs.msg import Twist2DStamped, BoolStamped
+from duckietown_msgs.msg import Twist2DStamped, BoolStamped, VehiclePose
 
 
 class MyNode(DTROS):
@@ -25,10 +25,10 @@ class MyNode(DTROS):
     # construct publisher and subsriber
         self.pub = rospy.Publisher('/duckiesam/chatter', String, queue_size=10)
         self.sub_image = rospy.Subscriber("/duckiesam/camera_node/image/compressed", CompressedImage, self.find_marker, buff_size=921600,queue_size=1)
-        self.pub_image = rospy.Publisher('/duckiesam/modified_image', Image, queue_size = 1)
+        self.pub_image = rospy.Publisher('/duckiesam/camera_node/image', Image, queue_size = 1)
         self.sub_info = rospy.Subscriber("/duckiesam/camera_node/camera_info", CameraInfo, self.get_camera_info, queue_size=1)
         self.pub_move = rospy.Publisher("/duckiesam/joy_mapper_node/car_cmd", Twist2DStamped, queue_size = 1)
-        self.leader_detected = rospy.Publisher("/duckiesam/detection",BoolStamped, queue_size=1)
+	self.pub_pose = rospy.Publisher("/duckiesam/pose", VehiclePose, queue_size=1)
 
 	#values for detecting marker
         self.starting = 0
@@ -39,6 +39,7 @@ class MyNode(DTROS):
         self.imagelast = None
         self.processedImg = None
         self.detected = False
+	self.number = 0
 
 	#values for calculating pose of robot
 	self.originalmatrix()
@@ -51,45 +52,30 @@ class MyNode(DTROS):
         #self.angle_l = None
 
 	#values for driving the robot
-        self.maxdistance = 0.2
-        self.speedN = 0
-        self.e_vB = 0
-        self.rotationN = 0
-        self.mindistance = 0.1
-        self.d_e = 0 #distance error
-        self.d_e_1 = 5
-        self.d_e_2 = 10
-        self.y2 = 0
-        self.controltime = rospy.Time.now()
-        self.Kp = 1
-        self.Ki = 0.1
-        self.Kd = 0
-        self.I = 0
-        self.Rp = 1
-        self.Ri = 1
-        self.Rd = 1
+        self.initialvalues()
 
 	rospy.on_shutdown(self.my_shutdown)
         
     def initialvalues(self):
-        self.default_v = 0.20
-        self.maxdistance = 0.2
+        
+        self.maxdistance = 0.25
         self.speedN = 0
         self.e_vB = 0
         self.rotationN = 0
         self.mindistance = 0.2
+	self.d_before = 0.0
         self.d_e = 0 #distance error
-        self.d_e_1 = 5
-        self.d_e_2 = 10
+        #self.d_e_1 = 0
+        #self.d_e_2 = 0
         self.y2 = 0
         self.controltime = rospy.Time.now()
-        self.Kp = 1
+        self.Kp = 0.5
         self.Ki = 0.1
-        self.Kd = 0
+        self.Kd = 0.1
         self.I = 0
-        self.Rp = 1
-        self.Ri = 1
-        self.Rd = 1
+        self.r1 = 1
+        self.r2 = 2
+        self.r3 = 1
         
         
     #get camera info for pinhole camera model
@@ -117,7 +103,9 @@ class MyNode(DTROS):
         processedImg = self.imagelast.copy()
         cmd = Twist2DStamped()
         cmd.header.stamp = self.starting
-
+	self.number += 1
+	cmd.header.seq = self.number
+	
         if detection:
             cv2.drawChessboardCorners(processedImg, (7,3), corners, detection)
             self.detected = True
@@ -128,13 +116,12 @@ class MyNode(DTROS):
                 twoone.append(point)
             twoone = np.array(twoone)
             
-            
             rotationvector, translationvector, processedImg = self.gradient(twoone,processedImg)
             self.detected = self.solP
             img_out = self.bridge.cv2_to_imgmsg(processedImg, "bgr8")
             self.pub_image.publish(img_out)
-            distance, angle_f, angle_l, y2 = self.find_distance(rotationvector, translationvector)
-            self.move(y2, angle_l, distance)
+            distance, angle_f, angle_l, y2 = self.find_distance(translationvector, rotationvector)
+            self.move(y2, angle_l, distance, self.number)
             self.ending = rospy.Time.now()
         else:
             self.detected = False
@@ -144,6 +131,11 @@ class MyNode(DTROS):
             cmd.v = 0
             cmd.omega = 0
             self.pub_move.publish(cmd)
+
+	time_took = (self.ending - self.starting).to_sec()
+	textdistance = "Num = %s, time = %s, Detected = %s" % (self.number, time_took, self.detected)
+        rospy.loginfo("%s" % textdistance)
+	rospy.Rate(10).sleep()
             
     #step 2 : makes matrix for 3d original shape
     def originalmatrix(self):
@@ -158,15 +150,14 @@ class MyNode(DTROS):
     #step 3 : use intrinsic matrix and solvePnP, return rvec and tvec, print axis
     def gradient(self, imgpts, processedImg):
     #using solvePnP to find rotation vector and translation vector and also find 3D point to the image plane
-        solP, rotationvector, translationvector = cv2.solvePnP(self.originalmtx, imgpts, self.camerainfo.intrinsicMatrix(), self.camerainfo.distortionCoeffs())
-        if solP:
+        self.solP, rotationvector, translationvector = cv2.solvePnP(self.originalmtx, imgpts, self.camerainfo.intrinsicMatrix(), self.camerainfo.distortionCoeffs())
+        if self.solP:
             pointsin3D, jacoB = cv2.projectPoints(self.originalmtx, rotationvector, translationvector, self.camerainfo.intrinsicMatrix(), self.camerainfo.distortionCoeffs())
             pointaxis, _ = cv2.projectPoints(self.axis, rotationvector, translationvector, self.camerainfo.intrinsicMatrix(), self.camerainfo.distortionCoeffs())
             processedImg = cv2.line(processedImg, tuple(imgpts[10].ravel()), tuple(pointaxis[0].ravel()), (255, 0, 0), 2)
             processedImg = cv2.line(processedImg, tuple(imgpts[10].ravel()), tuple(pointaxis[1].ravel()), (0, 255, 0), 2)
             processedImg = cv2.line(processedImg, tuple(imgpts[10].ravel()), tuple(pointaxis[2].ravel()), (0, 0, 255), 3)
-	    #textdistance = "x = %s, y = %s, z = %s" % (self.distance, self.angle_f, self.angle_l, self.y2)
-            #rospy.loginfo("%s" % textdistance)
+	    
 	return rotationvector, translationvector, processedImg
 
     #step 4 : find distance between robot and following robot print out distance and time
@@ -184,18 +175,28 @@ class MyNode(DTROS):
         angle_l = np.arctan2(-R_inverse[2,0], math.sqrt(R_inverse[2,1]**2 + R_inverse[2,2]**2))
         
         T = np.array([-np.sin(angle_l), np.cos(angle_l)])
+
+	#tvecW is position of camera(follower vehicle) in world frame
         tvecW = -np.dot(R_inverse, translationvector)
-        x_y = np.array([tvz[0], tvx[0]])
+
+	#desire point [0.20, 0] x,y, now tvz = x tvx = y
+        x_y = np.array([tvecW[2][0], tvecW[0][0]])
         
-        y2 = -np.dot(T,x_y) - 0.01*np.sin(angle_l)
+        y2 = tvecW[0][0] - 0.05*np.sin(angle_l)
         
         textdistance = "Distance = %s, Angle of Follower = %s, Angle of Leader = %s, y = %s" % (distance, angle_f, angle_l, y2)
         rospy.loginfo("%s" % textdistance)
+	position = VehiclePose()
+	position.header.stamp = rospy.Time.now()
+	position.rho.data = distance
+	position.theta.data = angle_f
+	position.psi.data = angle_l
+	self.pub_pose.publish(position)
         #self.pub.publish(textdistance)
 	return distance, angle_f, angle_l, y2
         
-    #step 5 : use joy mapper to control the robot PID controller
-    def move(self, y_to, angle_to, d):
+    #step 5 : use joy mapper to control the robot PID controller and steering angle by tracking error
+    def move(self, y_to, angle_to, d, number):
         #y_to is needed y value to be parallel to leader's center line
         #angle_to is angle needed to rotate
         #d is distance between required position and now position
@@ -203,49 +204,68 @@ class MyNode(DTROS):
         
         time = rospy.Time.now()
         cmd.header.stamp = time
+	cmd.header.seq = number
         dt = (time - self.controltime).to_sec()
-        if dt > 3:
-            if d < self.maxdistance:
-                cmd.v = 0
-                cmd.omega = 0
+        if dt > 3 and not self.detected:
+            #if d < self.maxdistance:
+            cmd.v = 0
+            cmd.omega = 0
+	    self.initialvalues()
         else:
-            self.d_e = d - self.maxdistance
-            error_d = (self.d_e - self.d_e_1)/dt
-            errorB = (self.d_e_1 - self.d_e_2)/dt
+            self.d_e = d - self.mindistance #new distance error
             
-            e_v = error_d - errorB
-            #PID controller for the angle, velocity is default or 0.
+	    error_d = (d - self.d_before)/dt + self.d_e/dt
             
-            P = self.Kp*(e_v)
-            self.I = self.I + self.Ki*(e_v + self.e_vB)/2*dt
-            D = self.Kd*(e_v + self.e_vB)/dt
+            #e_v = error_d - errorB
+            #PID controller for the velocity
             
-            #self.speedN = P + self.I + D
+            P = self.Kp*(error_d) #Proportional Controller 
+            self.I = self.I + self.Ki*((error_d + self.e_vB)/2)*dt #Integral 
+            D = self.Kd*(error_d + self.e_vB)/dt #
             
-            self.rotationN = self.Rp*(y_to) + self.Ri*(angle_to) + self.Rd*(np.sin(angle_to))
+            self.speedN = P + self.I + D
             
-            cmd.v = self.default_v
+	    #steering by longitudinal and tracking error angle with 
+	    #r1,r2,r3 control parameters
+            self.rotationN = self.r1*(y_to) + self.r2*(-angle_to) + self.r3*(np.sin(-angle_to))
+            
+            cmd.v = self.speedN
             cmd.omega = self.rotationN
+	    textdistance = "Velocity = %s, Rotation = %s" % (cmd.v, cmd.omega)
+            rospy.loginfo("%s" % textdistance)
 
-            self.e_vB = e_v
-            self.d_e_2 = self.d_e_1
-            self.d_e_1 = self.d_e
-            if self.d_e < 0.05 or self.speedN < 0:
-                cmd.v = 0
+            self.e_vB = error_d
+            
+	    self.d_before = d
+            
+            if d < 0.15 or self.speedN > 0.6 or (self.rotationN >= 0.5 and self.rotationN <= -0.5):
+                self.initialvalues()
+		cmd.v = 0
                 cmd.omega = 0
-
-        textdistance = "Velocity = %s, Rotation = %s" % (cmd.v, cmd.omega)
+	
+        textdistance = "Num = %s, Velocity = %s, Rotation = %s, dt = %s" % (number, cmd.v, cmd.omega, dt)
         rospy.loginfo("%s" % textdistance)
         self.pub_move.publish(cmd)
         self.controltime = time
 
     def my_shutdown(self):
         cmd = Twist2DStamped()
+	cmd.header.seq = self.number
         cmd.v = 0
         cmd.omega = 0
         self.pub_move.publish(cmd)
         rospy.sleep(1)
-        print("shutting down") 
+        self.sub_image.unregister()
+        self.sub_info.unregister()
+	rospy.sleep(0.5)
+	self.pub.unregister()
+        self.pub_move.unregister()
+	self.pub_image.unregister()
+	self.pub_pose.unregister()
+        print("shutting down")
+	rospy.sleep(0.5)
+	rospy.signal_shutdown("exit")
+	
 
 
 if __name__ == '__main__':
@@ -253,10 +273,10 @@ if __name__ == '__main__':
     node = MyNode(node_name='my_node')
     
     # keep spinning
-   # try:
-    rospy.spin()
-    #except KeyboardInterrupt:
-    #    print("shutting down")
+    try:
+    	rospy.spin()
+    except KeyboardInterrupt:
+        print("shutting down")
 	
     #cv2.destroyAllWindows()
     
